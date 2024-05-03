@@ -1,0 +1,138 @@
+---
+- hosts: localhost
+  tasks:
+
+  - name: Get my public IP
+    community.general.ipify_facts:
+
+  - name: Create security group for node communication
+    amazon.aws.ec2_security_group:
+      name: hadoop-sg
+      description: sg with total access within hadoop nodes
+      region: us-east-1
+      rules:
+        - proto: all
+          group_name: hadoop-sg
+        - proto: tcp
+          cidr_ip: "{{ ipify_public_ip }}/32"
+          ports: 
+          - 22
+
+- hosts: all
+  tasks:
+    # - name: Uninstall incompatible packages
+    #   become: true
+    #   ansible.builtin.yum:
+    #     name: 
+    #       - docker
+    #       - docker-client 
+    #       - docker-client-latest
+    #       - docker-common
+    #       - docker-latest
+    #       - docker-latest-logrotate
+    #       - docker-logrotate
+    #       - docker-engine
+    #     state: removed
+
+    # - name: Install yum-utils
+    #   become: true
+    #   ansible.builtin.yum:
+    #     name: yum-utils
+    #     state: present
+
+    # - name: Add Docker repository
+    #   become: true
+    #   shell: yum-config-manager --add-repo=https://download.docker.com/linux/centos/docker-ce.repo
+
+    # - name: Install Docker
+    #   become: true
+    #   ansible.builtin.yum:
+    #     name:
+    #       - docker-ce 
+    #       - docker-ce-cli 
+    #       - containerd.io 
+    #       - docker-buildx-plugin 
+    #       - docker-compose-plugin
+    #     update_cache: true
+    #     state: present
+
+    - name: Install docker
+      become: true
+      ansible.builtin.yum:
+        name: docker
+        state: present
+
+    - name: Start Docker
+      become: true
+      ansible.builtin.systemd_service:
+        state: started
+        name: docker
+
+    - name: Ensure group "docker" exists
+      ansible.builtin.group:
+        name: docker
+        state: present
+
+    - name: Add ec2-user to docker group
+      become: true
+      ansible.builtin.user:
+        name: ec2-user
+        group: docker
+
+    - name: Install pip
+      become: true
+      ansible.builtin.yum:
+        name: python-pip
+        state: present
+
+    - name: Install docker python package
+      ansible.builtin.pip:
+        name: docker
+
+
+- hosts: localhost
+  tasks:
+    - name: Get hadoop-master node information
+      amazon.aws.ec2_instance_info:
+        region: us-east-1
+        filters:
+          "tag:Name": hadoop-master
+      register: hadoop_master
+
+- hosts: tag_Group_hadoop_master
+  tasks:
+    - name: Deploy Docker Swarm at hadoop-master
+      community.docker.docker_swarm:
+        advertise_addr: "{{ hostvars['localhost']['hadoop_master'].instances[0].private_ip_address }}"
+        state: present
+      register: docker_swarm
+
+    - name: Set fact for docker_swarm_token
+      set_fact:
+        docker_swarm_token: "{{ docker_swarm.swarm_facts.JoinTokens.Worker }}"
+
+- hosts: tag_Group_hadoop_worker
+  tasks:
+
+    - name: Debug hostvars
+      debug:
+        msg: "{{ hostvars[groups['tag_Group_hadoop_master'][0]]['docker_swarm_token'] }}"
+
+    - name: Add worker nodes to Docker Swarm cluster
+      community.docker.docker_swarm:
+        state: join
+        remote_addrs: "{{ hostvars['localhost']['hadoop_master'].instances[0].private_ip_address }}"
+        join_token: "{{ hostvars[groups['tag_Group_hadoop_master'][0]]['docker_swarm_token'] }}"
+
+- hosts: localhost
+  tasks:
+  - name: Update security group for removing ssh access to workers
+    amazon.aws.ec2_security_group:
+      name: hadoop-sg
+      description: sg with total access within hadoop nodes
+      region: us-east-1
+      rules:
+        - proto: all
+          group_name: hadoop-sg
+
+
